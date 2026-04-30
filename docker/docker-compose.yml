@@ -1,0 +1,36 @@
+services:
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+
+  app:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    ports:
+      - "8000:8000"
+    env_file:
+      - ../.env
+    depends_on:
+      - redis
+    volumes:
+      - app_data:/app/data
+
+  worker:
+    build:
+      context: ..
+      dockerfile: docker/Dockerfile
+    command: celery -A src.celery_app worker --loglevel=info --concurrency=2
+    env_file:
+      - ../.env
+    depends_on:
+      - redis
+    volumes:
+      - app_data:/app/data
+
+volumes:
+  redis_data:
+  app_data:
