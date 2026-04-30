@@ -1,3 +1,4 @@
+import asyncio
 from pathlib import Path
 
 import structlog
@@ -14,6 +15,14 @@ def get_transcriber(config: AppConfig):
     if config.asr_backend == "local":
         from src.layers.transcription.whisper_local import WhisperLocalTranscriber
         return WhisperLocalTranscriber(model_size=config.whisper_model_size)
+    elif config.asr_backend == "groq":
+        from src.layers.transcription.groq_whisper import GroqWhisperTranscriber
+        if not config.groq_api_key:
+            raise ValueError(
+                "PKA_GROQ_API_KEY is required when asr_backend='groq'. "
+                "Get a free key at https://console.groq.com"
+            )
+        return GroqWhisperTranscriber(api_key=config.groq_api_key)
     else:
         from src.layers.transcription.openrouter_asr import OpenRouterASRTranscriber
         return OpenRouterASRTranscriber(
@@ -28,33 +37,18 @@ async def transcribe_chunks(
     config: AppConfig,
     language: str | None = None,
 ) -> list[TranscriptSegment]:
-    """Transcribe all chunks and merge into a single segment list with adjusted timestamps."""
+    """Transcribe all chunks and merge into a single segment list with adjusted timestamps.
+
+    For API-based backends (groq, api), chunks are processed in parallel for speed.
+    For local backend, chunks are processed sequentially (CPU-bound).
+    """
     transcriber = get_transcriber(config)
-    all_segments: list[TranscriptSegment] = []
+    use_parallel = config.asr_backend in ("groq", "api")
 
-    for chunk in chunks:
-        chunk_segments = await transcriber.transcribe(chunk.file_path, language=language)
-
-        # For OpenRouter ASR (no native timestamps), approximate timestamps
-        # based on chunk position and duration
-        for seg in chunk_segments:
-            if seg.end == 0.0:
-                # No timestamps from ASR - approximate using chunk boundaries
-                adjusted = TranscriptSegment(
-                    start=chunk.start_seconds,
-                    end=chunk.end_seconds,
-                    text=seg.text,
-                    speaker=seg.speaker,
-                )
-            else:
-                # Has timestamps (e.g., from local whisper) - offset by chunk start
-                adjusted = TranscriptSegment(
-                    start=seg.start + chunk.start_seconds,
-                    end=seg.end + chunk.start_seconds,
-                    text=seg.text,
-                    speaker=seg.speaker,
-                )
-            all_segments.append(adjusted)
+    if use_parallel and len(chunks) > 1:
+        all_segments = await _transcribe_parallel(transcriber, chunks, language)
+    else:
+        all_segments = await _transcribe_sequential(transcriber, chunks, language)
 
     # Deduplicate overlapping segments (for chunked audio with overlap)
     if len(chunks) > 1:
@@ -65,11 +59,72 @@ async def transcribe_chunks(
     return all_segments
 
 
+async def _transcribe_sequential(
+    transcriber, chunks: list[AudioChunk], language: str | None
+) -> list[TranscriptSegment]:
+    """Transcribe chunks one by one (for CPU-bound local whisper)."""
+    all_segments: list[TranscriptSegment] = []
+
+    for chunk in chunks:
+        chunk_segments = await transcriber.transcribe(chunk.file_path, language=language)
+        all_segments.extend(_adjust_timestamps(chunk_segments, chunk))
+
+    return all_segments
+
+
+async def _transcribe_parallel(
+    transcriber, chunks: list[AudioChunk], language: str | None
+) -> list[TranscriptSegment]:
+    """Transcribe chunks in parallel (for API-based backends)."""
+    # Limit concurrency to avoid rate limits
+    semaphore = asyncio.Semaphore(3)
+
+    async def _transcribe_one(chunk: AudioChunk) -> list[TranscriptSegment]:
+        async with semaphore:
+            chunk_segments = await transcriber.transcribe(chunk.file_path, language=language)
+            return _adjust_timestamps(chunk_segments, chunk)
+
+    results = await asyncio.gather(*[_transcribe_one(c) for c in chunks])
+
+    all_segments: list[TranscriptSegment] = []
+    for segs in results:
+        all_segments.extend(segs)
+    return all_segments
+
+
+def _adjust_timestamps(
+    chunk_segments: list[TranscriptSegment], chunk: AudioChunk
+) -> list[TranscriptSegment]:
+    """Adjust segment timestamps based on chunk offset."""
+    adjusted = []
+    for seg in chunk_segments:
+        if seg.end == 0.0:
+            # No timestamps from ASR - approximate using chunk boundaries
+            adjusted.append(TranscriptSegment(
+                start=chunk.start_seconds,
+                end=chunk.end_seconds,
+                text=seg.text,
+                speaker=seg.speaker,
+            ))
+        else:
+            # Has timestamps (e.g., from local whisper or groq) - offset by chunk start
+            adjusted.append(TranscriptSegment(
+                start=seg.start + chunk.start_seconds,
+                end=seg.end + chunk.start_seconds,
+                text=seg.text,
+                speaker=seg.speaker,
+            ))
+    return adjusted
+
+
 def _deduplicate_overlaps(
     segments: list[TranscriptSegment],
     chunks: list[AudioChunk],
 ) -> list[TranscriptSegment]:
-    """Remove duplicate segments from overlapping chunk regions."""
+    """Remove duplicate segments from overlapping chunk regions.
+
+    Uses timestamp proximity + text similarity to detect duplicates.
+    """
     if len(chunks) <= 1:
         return segments
 
@@ -84,18 +139,21 @@ def _deduplicate_overlaps(
     if not overlap_zones:
         return segments
 
-    # For segments in overlap zones, keep only those from the chunk
-    # where the segment falls in the middle (better context)
+    # For segments in overlap zones, keep only first occurrence
+    # Use rounded start time + text prefix as dedup key
     deduplicated = []
-    seen_texts = set()
+    seen_keys = set()
 
     for seg in sorted(segments, key=lambda s: s.start):
         in_overlap = any(start <= seg.start <= end for start, end in overlap_zones)
         if in_overlap:
-            key = (seg.text[:50], round(seg.start, 0))
-            if key in seen_texts:
+            # Use first 30 chars (handles both short and long segments)
+            text_key = seg.text[:30].strip()
+            time_key = round(seg.start, -1)  # Round to nearest 10s
+            key = (text_key, time_key)
+            if key in seen_keys:
                 continue
-            seen_texts.add(key)
+            seen_keys.add(key)
 
         deduplicated.append(seg)
 

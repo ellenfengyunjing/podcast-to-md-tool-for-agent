@@ -24,9 +24,12 @@ class AppConfig(BaseSettings):
     # Embedding Model
     embedding_model: str = "baai/bge-large-en-v1.5"
 
-    # Local ASR fallback
-    asr_backend: str = "local"  # "api" (OpenRouter) or "local" (faster-whisper)
+    # ASR Backend: "local" (faster-whisper CPU), "groq" (Groq Whisper API), "api" (OpenRouter)
+    asr_backend: str = "local"
     whisper_model_size: str = "large-v3"
+
+    # Groq API (for cloud ASR - extremely fast)
+    groq_api_key: str = ""
 
     # Redis / Celery
     redis_url: str = "redis://localhost:6379/0"

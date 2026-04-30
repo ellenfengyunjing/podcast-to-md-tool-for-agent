@@ -30,6 +30,7 @@ from src.layers.audio.chunker import AudioChunker
 from src.layers.transcription.factory import transcribe_chunks
 from src.layers.semantic.llm_client import LLMClient
 from src.layers.semantic.summarizer import Summarizer
+from src.layers.semantic.single_pass import SinglePassExtractor
 from src.layers.memory.compressor import MemoryCompressor
 from src.layers.output.assembler import OutputAssembler
 
@@ -101,15 +102,49 @@ async def _run_pipeline(url: str, transcript_only: bool = False, summary_only: b
             "paragraphs": paragraphs,
         }
 
-    # Stage 5: Summarize
+    # Stage 5+6: Summarize + Memory (single-pass when possible)
     llm = LLMClient(
         model=config.llm_model,
         api_key=config.openrouter_api_key,
         base_url=config.openrouter_base_url,
     )
-    summarizer = Summarizer(llm)
     full_text = " ".join(s.text for s in segments)
-    summary = await summarizer.summarize(full_text, title=resolved.title)
+
+    single_pass = SinglePassExtractor(llm, token_budget=2000)
+    if single_pass.can_single_pass(full_text):
+        # Fast path: one LLM call for both summary and memory
+        summary, memory = await single_pass.extract(
+            full_text=full_text,
+            title=resolved.title,
+            duration=extracted.duration_seconds,
+            source_id=job_id,
+            source_url=resolved.original_url,
+        )
+    else:
+        # Fallback: multi-step for very long transcripts
+        summarizer = Summarizer(llm)
+        summary = await summarizer.summarize(full_text, title=resolved.title)
+
+        if summary_only:
+            return {
+                "title": summary.title,
+                "one_line_summary": summary.one_line_summary,
+                "executive_summary": summary.executive_summary,
+                "key_topics": [{"topic": t.topic, "summary": t.summary} for t in summary.key_topics],
+                "key_insights": summary.key_insights,
+                "entities": [{"name": e.name, "type": e.type} for e in summary.entities],
+            }
+
+        compressor = MemoryCompressor(llm, token_budget=2000)
+        memory = await compressor.compress(
+            segments=segments,
+            source_id=job_id,
+            source_title=resolved.title,
+            source_url=resolved.original_url,
+            total_duration=extracted.duration_seconds,
+            language=summary.language,
+            summary_text=summary.executive_summary,
+        )
 
     if summary_only:
         return {
@@ -121,18 +156,6 @@ async def _run_pipeline(url: str, transcript_only: bool = False, summary_only: b
             "entities": [{"name": e.name, "type": e.type} for e in summary.entities],
         }
 
-    # Stage 6: Memory compression
-    compressor = MemoryCompressor(llm, token_budget=2000)
-    memory = await compressor.compress(
-        segments=segments,
-        source_id=job_id,
-        source_title=resolved.title,
-        source_url=resolved.original_url,
-        total_duration=extracted.duration_seconds,
-        language=summary.language,
-        summary_text=summary.executive_summary,
-    )
-
     # Stage 7: Assemble
     completed_at = datetime.now(timezone.utc)
     processing_info = ProcessingInfo(
@@ -140,7 +163,9 @@ async def _run_pipeline(url: str, transcript_only: bool = False, summary_only: b
         started_at=started_at.isoformat(),
         completed_at=completed_at.isoformat(),
         duration_seconds=(completed_at - started_at).total_seconds(),
-        asr_model=f"faster-whisper/{config.whisper_model_size}",
+        asr_model=f"faster-whisper/{config.whisper_model_size}" if config.asr_backend == "local"
+        else f"groq/whisper-large-v3-turbo" if config.asr_backend == "groq"
+        else config.asr_model,
         llm_model=config.llm_model,
     )
     assembler = OutputAssembler()

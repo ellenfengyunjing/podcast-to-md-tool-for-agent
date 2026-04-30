@@ -191,20 +191,50 @@ src/
 |------|------|
 | Web 框架 | FastAPI (async) |
 | 任务队列 | Celery + Redis |
-| 语音识别 | faster-whisper (本地 CPU) |
+| 语音识别 | faster-whisper (本地) / Groq Whisper API (云端) |
 | LLM | OpenRouter (meta-llama/llama-4-maverick) |
 | 音频处理 | yt-dlp + ffmpeg |
 | 数据验证 | Pydantic v2 |
 | 数据库 | SQLite + SQLAlchemy 2.0 async |
 | Agent 协议 | MCP (Model Context Protocol) |
 
+## 语音识别方案
+
+本项目支持两种 ASR 方案，用户可通过 `PKA_ASR_BACKEND` 环境变量切换：
+
+| 方案 | 配置值 | 速度 | 成本 | 适用场景 |
+|------|--------|------|------|----------|
+| **本地 faster-whisper** | `local` | 慢（~1x 实时） | 免费 | 离线使用、隐私敏感 |
+| **Groq Whisper API** | `groq` | 极快（~100x 实时） | 免费额度 8h/天 | 推荐日常使用 |
+| OpenRouter Audio | `api` | 中等 | 按量付费 | 备选方案 |
+
+### 使用 Groq（推荐，速度最快）
+
+```bash
+# .env 中配置
+PKA_ASR_BACKEND=groq
+PKA_GROQ_API_KEY=gsk_your-key-here  # 在 https://console.groq.com 免费获取
+```
+
+30 分钟音频约 10 秒完成转写，自带标点符号和时间戳。
+
+### 使用本地 faster-whisper（离线）
+
+```bash
+PKA_ASR_BACKEND=local
+PKA_WHISPER_MODEL_SIZE=medium  # base/small/medium/large-v3
+```
+
+无需网络，但 CPU 转写较慢（30 分钟音频约 45 分钟处理）。
+
 ## 配置说明
 
 | 环境变量 | 说明 | 默认值 |
 |----------|------|--------|
-| `PKA_OPENROUTER_API_KEY` | OpenRouter API 密钥 | (必填) |
-| `PKA_ASR_BACKEND` | 语音识别后端：`local` 或 `api` | `local` |
-| `PKA_WHISPER_MODEL_SIZE` | Whisper 模型：base/small/medium/large-v3 | `medium` |
+| `PKA_OPENROUTER_API_KEY` | OpenRouter API 密钥（LLM 摘要用） | (必填) |
+| `PKA_ASR_BACKEND` | 语音识别后端：`local`、`groq`、`api` | `local` |
+| `PKA_GROQ_API_KEY` | Groq API 密钥（ASR 用） | (groq 模式必填) |
+| `PKA_WHISPER_MODEL_SIZE` | 本地 Whisper 模型大小 | `large-v3` |
 | `PKA_LLM_MODEL` | LLM 模型名称 | `meta-llama/llama-4-maverick` |
 | `PKA_DATA_DIR` | 数据存储目录 | `./data` |
 

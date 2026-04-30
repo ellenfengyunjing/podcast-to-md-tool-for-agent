@@ -93,9 +93,16 @@ class OutputAssembler:
     def _build_paragraphs(
         segments: list[TranscriptSegment], block_seconds: int = 60
     ) -> list[TimedParagraph]:
-        """Group segments into time-based paragraphs (default 1 minute each)."""
+        """Group segments into time-based paragraphs with speaker labels.
+
+        When multiple speakers exist, text is formatted with speaker prefixes.
+        """
         if not segments:
             return []
+
+        # Detect if multiple speakers exist
+        speakers = set(seg.speaker for seg in segments)
+        multi_speaker = len(speakers) > 1
 
         paragraphs = []
         current_block_idx = 0
@@ -119,7 +126,11 @@ class OutputAssembler:
                 current_texts = []
                 current_block_idx = block_idx
 
-            current_texts.append(seg.text)
+            if multi_speaker:
+                # Prefix with speaker label for multi-speaker content
+                current_texts.append(f"[{seg.speaker}] {seg.text}\n")
+            else:
+                current_texts.append(seg.text)
 
         # Flush last block
         if current_texts:

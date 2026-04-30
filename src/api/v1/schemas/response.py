@@ -52,6 +52,7 @@ class TimedParagraph(BaseModel):
     time_end: float
     time_label: str  # e.g. "00:00 - 01:00"
     text: str
+    speaker: str | None = None  # Speaker label if differentiated
 
 
 class FullTranscript(BaseModel):

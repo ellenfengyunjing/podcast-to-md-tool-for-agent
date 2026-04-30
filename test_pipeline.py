@@ -26,6 +26,7 @@ from src.layers.audio.chunker import AudioChunker
 from src.layers.transcription.factory import transcribe_chunks
 from src.layers.semantic.llm_client import LLMClient
 from src.layers.semantic.summarizer import Summarizer
+from src.layers.semantic.single_pass import SinglePassExtractor
 from src.layers.memory.compressor import MemoryCompressor
 from src.layers.output.assembler import OutputAssembler, _count_words
 
@@ -66,8 +67,14 @@ async def main(url: str):
     chunks = await chunker.chunk(extracted.file_path, extracted.duration_seconds)
     print(f"       Chunks: {len(chunks)}")
 
-    print(f"\n[4/7] Transcribing with faster-whisper ({config.whisper_model_size})...")
-    print(f"       (First run will download the model)")
+    print(f"\n[4/7] Transcribing with {config.asr_backend} backend...")
+    if config.asr_backend == "local":
+        print(f"       Model: faster-whisper/{config.whisper_model_size}")
+        print(f"       (First run will download the model)")
+    elif config.asr_backend == "groq":
+        print(f"       Model: Groq whisper-large-v3-turbo (cloud, fast)")
+    else:
+        print(f"       Model: {config.asr_model} (OpenRouter)")
     segments = await transcribe_chunks(chunks, config, language=None)
     print(f"       Segments: {len(segments)}")
     full_text = " ".join(s.text for s in segments)
@@ -80,25 +87,45 @@ async def main(url: str):
         api_key=config.openrouter_api_key,
         base_url=config.openrouter_base_url,
     )
-    summarizer = Summarizer(llm)
-    summary = await summarizer.summarize(full_text, title=resolved.title)
-    print(f"       Title: {summary.title}")
-    print(f"       One-line: {summary.one_line_summary}")
 
-    print(f"\n[6/7] Compressing to agent memory...")
-    compressor = MemoryCompressor(llm, token_budget=2000)
-    memory = await compressor.compress(
-        segments=segments,
-        source_id=job_id,
-        source_title=resolved.title,
-        source_url=resolved.original_url,
-        total_duration=extracted.duration_seconds,
-        language=summary.language,
-        summary_text=summary.executive_summary,
-    )
-    print(f"       Memory blocks: {len(memory.memory_blocks)}")
-    print(f"       Total tokens: {memory.total_tokens}")
-    print(f"       Compression ratio: {memory.compression_ratio}")
+    # Try single-pass extraction (1 LLM call instead of 8)
+    extractor = SinglePassExtractor(llm, token_budget=2000)
+    if extractor.can_single_pass(full_text):
+        print(f"       Mode: single-pass (transcript fits in one call)")
+        summary, memory = await extractor.extract(
+            full_text=full_text,
+            title=resolved.title,
+            duration=extracted.duration_seconds,
+            source_id=job_id,
+            source_url=resolved.original_url,
+        )
+        print(f"       Title: {summary.title}")
+        print(f"       One-line: {summary.one_line_summary}")
+        print(f"\n[6/7] Memory extracted in single pass...")
+        print(f"       Memory blocks: {len(memory.memory_blocks)}")
+        print(f"       Total tokens: {memory.total_tokens}")
+        print(f"       Compression ratio: {memory.compression_ratio}")
+    else:
+        print(f"       Mode: multi-step (transcript too long for single pass)")
+        summarizer = Summarizer(llm)
+        summary = await summarizer.summarize(full_text, title=resolved.title)
+        print(f"       Title: {summary.title}")
+        print(f"       One-line: {summary.one_line_summary}")
+
+        print(f"\n[6/7] Compressing to agent memory...")
+        compressor = MemoryCompressor(llm, token_budget=2000)
+        memory = await compressor.compress(
+            segments=segments,
+            source_id=job_id,
+            source_title=resolved.title,
+            source_url=resolved.original_url,
+            total_duration=extracted.duration_seconds,
+            language=summary.language,
+            summary_text=summary.executive_summary,
+        )
+        print(f"       Memory blocks: {len(memory.memory_blocks)}")
+        print(f"       Total tokens: {memory.total_tokens}")
+        print(f"       Compression ratio: {memory.compression_ratio}")
 
     print(f"\n[7/7] Assembling final output...")
     completed_at = datetime.now(timezone.utc).isoformat()
@@ -107,7 +134,9 @@ async def main(url: str):
         started_at=started_at,
         completed_at=completed_at,
         duration_seconds=(datetime.fromisoformat(completed_at) - datetime.fromisoformat(started_at)).total_seconds(),
-        asr_model=f"faster-whisper/{config.whisper_model_size}",
+        asr_model=f"faster-whisper/{config.whisper_model_size}" if config.asr_backend == "local"
+        else f"groq/whisper-large-v3-turbo" if config.asr_backend == "groq"
+        else config.asr_model,
         llm_model=config.llm_model,
     )
     assembler = OutputAssembler()
@@ -142,12 +171,18 @@ async def main(url: str):
 
 
 def _save_readable_transcript(segments, title: str, output_path: Path):
-    """Save transcript grouped into 1-minute blocks for easy reading."""
+    """Save transcript grouped into 1-minute blocks with speaker labels."""
     output_path.parent.mkdir(parents=True, exist_ok=True)
+
+    # Detect multiple speakers
+    speakers = set(seg.speaker for seg in segments)
+    multi_speaker = len(speakers) > 1
 
     lines = []
     lines.append(f"# {title}")
     lines.append(f"# Total segments: {len(segments)}")
+    if multi_speaker:
+        lines.append(f"# Speakers: {', '.join(sorted(speakers))}")
     lines.append("")
 
     if not segments:
@@ -174,7 +209,10 @@ def _save_readable_transcript(segments, title: str, output_path: Path):
             current_block_texts = []
             current_block_start = block_start
 
-        current_block_texts.append(seg.text)
+        if multi_speaker:
+            current_block_texts.append(f"[{seg.speaker}] {seg.text}\n")
+        else:
+            current_block_texts.append(seg.text)
 
     # Write last block
     if current_block_texts:

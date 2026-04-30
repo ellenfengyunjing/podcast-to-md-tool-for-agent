@@ -6,6 +6,18 @@ from src.api.v1.schemas.response import TranscriptSegment
 
 logger = structlog.get_logger()
 
+# Initial prompt to guide punctuation for Chinese/multilingual content
+PUNCTUATION_PROMPT_ZH = (
+    "以下是一段播客对话的转录文本，请注意添加标点符号。"
+    "你好，欢迎收听本期节目。今天我们来聊一聊人工智能的发展趋势，"
+    "以及它对我们日常生活的影响。"
+)
+PUNCTUATION_PROMPT_EN = (
+    "The following is a podcast transcript. "
+    "Hello, welcome to today's episode. We'll be discussing the latest trends "
+    "in artificial intelligence and their impact on our daily lives."
+)
+
 
 class WhisperLocalTranscriber:
     """Transcribe audio using faster-whisper (CPU mode)."""
@@ -44,7 +56,18 @@ class WhisperLocalTranscriber:
     def _transcribe_sync(self, audio_path: Path, language: str | None) -> list[TranscriptSegment]:
         model = self._get_model()
 
-        kwargs = {"beam_size": 5, "word_timestamps": False}
+        # Use initial_prompt to guide punctuation generation
+        initial_prompt = PUNCTUATION_PROMPT_ZH
+        if language and language.startswith("en"):
+            initial_prompt = PUNCTUATION_PROMPT_EN
+
+        kwargs = {
+            "beam_size": 5,
+            "word_timestamps": False,
+            "initial_prompt": initial_prompt,
+            "vad_filter": True,
+            "vad_parameters": {"min_silence_duration_ms": 500},
+        }
         if language:
             kwargs["language"] = language
 
