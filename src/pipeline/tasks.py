@@ -43,9 +43,6 @@ async def _process(job_id: str, request_params: dict):
     config = get_config()
     config.ensure_data_dir()
 
-    if request_params.get("asr_backend"):
-        config.asr_backend = request_params["asr_backend"]
-
     async def progress_callback(stage: str, percent: float):
         await _update_progress(job_id, stage, percent)
 

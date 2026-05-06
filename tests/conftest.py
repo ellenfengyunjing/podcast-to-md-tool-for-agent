@@ -15,8 +15,8 @@ def app_config(sample_data_dir):
 
     return AppConfig(
         debug=True,
-        asr_backend="api",
-        openai_api_key="test-key",
+        groq_api_key="test-groq-key",
+        llm_api_key="test-llm-key",
         llm_model="gpt-4o",
         redis_url="redis://localhost:6379/0",
         data_dir=sample_data_dir,

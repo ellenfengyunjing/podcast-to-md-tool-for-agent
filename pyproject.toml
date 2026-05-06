@@ -19,8 +19,8 @@ dependencies = [
     "tiktoken>=0.8.0",
     "structlog>=24.4.0",
     "python-multipart>=0.0.20",
-    "faster-whisper>=1.1.0",
     "mcp>=1.0.0",
+    "imageio-ffmpeg>=0.5.1",
 ]
 
 [project.optional-dependencies]

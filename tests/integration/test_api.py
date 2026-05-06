@@ -12,7 +12,8 @@ def setup_test_env(tmp_path):
     os.environ["PKA_DATABASE_URL"] = f"sqlite+aiosqlite:///{db_path}"
     os.environ["PKA_DATA_DIR"] = str(tmp_path)
     os.environ["PKA_DEBUG"] = "false"
-    os.environ["PKA_OPENROUTER_API_KEY"] = "test-key"
+    os.environ["PKA_GROQ_API_KEY"] = "test-groq-key"
+    os.environ["PKA_LLM_API_KEY"] = "test-llm-key"
 
     from src.storage.database import reset_engine
     reset_engine()

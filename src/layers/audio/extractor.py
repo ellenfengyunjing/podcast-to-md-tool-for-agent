@@ -32,7 +32,8 @@ class AudioExtractor:
         if resolved.platform == PlatformType.YOUTUBE:
             raw_path = await self._download_youtube(resolved.original_url, job_dir)
         else:
-            # GENERIC and RSS both have a direct audio_url
+            # APPLE_PODCASTS, XIAOYUZHOU, RSS and GENERIC all have a
+            # direct audio_url — stream it with httpx.
             raw_path = await self._download_http(resolved.audio_url, job_dir)
 
         # Convert to 16kHz mono WAV
